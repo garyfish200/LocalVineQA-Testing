@@ -1,11 +1,8 @@
 from fastapi import FastAPI, HTTPException, Header
-from fastapi.responses import JSONResponse, StreamingResponse
-from sse_starlette.sse import EventSourceResponse
-from starlette.responses import Response
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, AsyncGenerator
-import json
 from openai import AsyncOpenAI
 from openai.types.beta.assistant_stream_event import ThreadMessageDelta, ThreadMessageCreated, ThreadRunCompleted
 import os
@@ -25,10 +22,10 @@ app = FastAPI()
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Enable CORS for all routes
@@ -66,20 +63,11 @@ class ThreadMessage(BaseModel):
     message: str
     thread_id: str
 
-
-@app.post("/chat")
-async def chat_with_assistant(user_message: UserMessage, x_assistant_type: Optional[str] = Header(None)):
-    return EventSourceResponse(process_chat(user_message.message, assistant_type=x_assistant_type))
-
-@app.post("/chat_existing_thread")
-async def chat_with_existing_thread(thread_message: ThreadMessage, x_assistant_type: Optional[str] = Header(None)):
-    return EventSourceResponse(process_chat(thread_message.message, thread_message.thread_id, assistant_type=x_assistant_type))
-
-async def process_chat(message: str, thread_id: str = None, assistant_type: str = None):
+async def process_chat(message: str, thread_id: str = None, assistant_type: str = None) -> AsyncGenerator[str, None]:
     try:
         if not message.strip():
             logger.warning("Received empty message, skipping processing.")
-            yield "{}\n\n"
+            yield "data: {}\n\n"
             return
 
         if thread_id is None:
@@ -121,11 +109,11 @@ async def process_chat(message: str, thread_id: str = None, assistant_type: str 
                     if delta.content:
                         for content in delta.content:
                             if content.type == 'text':
-                                yield f"{content.text.value}"
+                                yield f"data: {content.text.value}\n\n"
                 elif isinstance(event, ThreadMessageCreated):
                     logger.info(f"Message created: {event}")
                 elif isinstance(event, ThreadRunCompleted):
-                    yield "[DONE]\n\n"
+                    yield "data: [DONE]\n\n"
                     break
                 else:
                     logger.warning(f"Unhandled event type: {type(event)}")
@@ -135,11 +123,19 @@ async def process_chat(message: str, thread_id: str = None, assistant_type: str 
             if messages.data:
                 final_message = messages.data[0]
                 logger.info(f"Final message: {final_message.id}")
-                yield f"[FINAL]{final_message.id}\n\n"
+                yield f"data: [FINAL]{final_message.id}\n\n"
 
     except Exception as e:
         logger.error(f"Error in process_chat: {str(e)}", exc_info=True)
-        yield f"ERROR: {str(e)}\n\n"
+        yield f"data: ERROR: {str(e)}\n\n"
+
+@app.post("/chat")
+async def chat_with_assistant(user_message: UserMessage, x_assistant_type: Optional[str] = Header(None)):
+    return StreamingResponse(process_chat(user_message.message, assistant_type=x_assistant_type), media_type="text/event-stream")
+
+@app.post("/chat_existing_thread")
+async def chat_with_existing_thread(thread_message: ThreadMessage, x_assistant_type: Optional[str] = Header(None)):
+    return StreamingResponse(process_chat(thread_message.message, thread_message.thread_id, assistant_type=x_assistant_type), media_type="text/event-stream")
 
 if __name__ == "__main__":
     import uvicorn
